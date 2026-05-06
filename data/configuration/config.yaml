@@ -1,0 +1,80 @@
+model:
+  dim: 1024
+  n_layers: 10
+  n_wave_heads: 8
+  n_scales: 5
+  sigma_scales:
+    - 0.5     
+    - 2.0      
+    - 8.0      
+    - 32.0     
+    - 128.0 
+  ff_mult: 2.6666666667
+  dropout: 0.1
+  max_seq: 1024
+  ffn_mode: "dense"
+  norm_type: "layer"
+  norm_kwargs: {}
+  gradient_checkpointing: true
+  num_experts: 8
+  active_experts: 2
+  aux_loss_coef: 0.01
+  compile_mode: null
+
+training:
+  max_steps: 30000
+  learning_rate: 0.001
+  min_learning_rate: 0.00003
+  warmup_steps: 250
+  decay_start_step: null
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  grad_clip: 1.0
+  precision: "bf16"
+  log_every_steps: 100
+  eval_every_steps: 500
+  eval_max_batches: 8
+  sample_every_steps: 200
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
+  restore_best_model: true
+
+training_data:
+  train_tokens_path: "data/tokens/train/tokens/tokenized.parquet"
+  validation_tokens_path: "data/tokens/validation/tokens/tokenized.parquet"
+  test_tokens_path: "data/tokens/test/tokens/tokenized.parquet"
+  batch_size: 8
+  eval_batch_size: 8
+  shuffle_train: true
+  num_workers: 2
+  pin_memory: true
+  drop_last: false
+  seed: 42
+
+generation:
+  max_new_tokens: 120
+  temperature: 0.9
+  top_k: 40
+  top_p: 0.95
+  repetition_penalty: 1.05
+
+tokenizer:
+  tokenizer_type: "sentencepiece"
+  model_path: "data/tokens/train/tokenizer/sp_tokenizer.model"
+  add_bos: true
+  add_eos: true
+
+checkpoint:
+  enabled: true
+  output_directory: "artifacts/checkpoints"
+  save_best: true
+  save_last: true
+
+wandb:
+  enabled: false
+  project: "suara"
+  name: null
+  entity: null
+  mode: "online"
+  log_model: false
