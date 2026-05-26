@@ -1,17 +1,11 @@
 model:
   dim: 1024
-  n_layers: 10
-  n_wave_heads: 8
-  n_scales: 5
-  sigma_scales:
-    - 0.5     
-    - 2.0      
-    - 8.0      
-    - 32.0     
-    - 128.0 
+  n_layers: 6
+  n_wave_heads: 4
+  n_scales: 4
   ff_mult: 2.6666666667
   dropout: 0.1
-  max_seq: 1024
+  max_seq: 512
   ffn_mode: "dense"
   norm_type: "layer"
   norm_kwargs: {}
@@ -23,7 +17,7 @@ model:
 
 training:
   max_steps: 30000
-  learning_rate: 0.001
+  learning_rate: 0.0001
   min_learning_rate: 0.00003
   warmup_steps: 250
   decay_start_step: null

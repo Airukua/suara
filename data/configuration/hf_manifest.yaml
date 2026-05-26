@@ -1,0 +1,68 @@
+datasets:
+  - name: Lyon28/Corpus-Indonesia
+    subset:
+    split: train
+    text_column: text
+    max_samples: 
+
+  - name: DamarJati/indocorpus-sastra
+    subset: 
+    split: train
+    text_column: text
+    max_samples: 
+  
+  - name: indonesian-nlp/wikipedia-id
+    subset: 
+    split: train
+    text_column: text
+    max_samples:
+  
+
+  - name: sabilmakbar/indo_wiki
+    subset: 
+    split: train
+    text_column: text
+    max_samples: 
+
+
+cache:
+  hf_cache_dir: data/cache/huggingface
+
+output:
+  raw_merged_dir: data/raw/merged_hf
+  cleaned_dir: data/cleaned/merged_hf
+  token_dir: data/tokens/merged_hf
+
+stage:
+  clean: true
+  tokenize: true
+
+split:
+  enabled: true
+  train_ratio: 0.98
+  val_ratio: 0.01
+  test_ratio: 0.01
+  seed: 42
+
+cleaning:
+  target_languages:
+    - id
+  min_quality_score: 0.25
+  dedup_enabled: true
+  pii_removal: true
+  toxic_filter: false
+  sample_fraction:
+
+tokenize:
+  tokenizer_mode: train
+  tokenizer_type: sentencepiece
+  tokenizer_subtype: bpe
+  pretrained_name:
+  vocab_size: 50000
+  context_length: 512
+  packing_strategy: greedy
+  output_format: parquet
+  corpus_sample_fraction: 
+  max_corpus_lines: 
+  add_bos: true
+  add_eos: true

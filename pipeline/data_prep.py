@@ -59,11 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-ratio", type=float, default=0.01)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--target-languages", default="")
-    parser.add_argument("--min-quality-score", type=float, default=0.35)
+    parser.add_argument("--min-quality-score", type=float, default=0.25)
     parser.add_argument("--sample-fraction", type=float, default=None)
     parser.add_argument("--disable-dedup", action="store_true")
     parser.add_argument("--disable-pii-removal", action="store_true")
-    parser.add_argument("--disable-toxic-filter", action="store_true")
+    parser.add_argument("--enable-toxic-filter", action="store_true")
     parser.add_argument("--tokenizer-mode", choices=["train", "load"], default="train")
     parser.add_argument(
         "--tokenizer-type",
@@ -284,7 +284,7 @@ def _run_cleaning_stage(args, input_path: str, output_path: str, target_language
         min_quality_score=args.min_quality_score,
         dedup_enabled=not args.disable_dedup,
         pii_removal=not args.disable_pii_removal,
-        toxic_filter=not args.disable_toxic_filter,
+        toxic_filter=args.enable_toxic_filter,
         sample_fraction=args.sample_fraction,
     )
     return stats

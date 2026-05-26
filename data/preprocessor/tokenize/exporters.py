@@ -1,6 +1,7 @@
 import logging
 import os
 import struct
+
 log = logging.getLogger("LLM-Tokenizer")
 
 def export_parquet(df, output_path: str) -> None:
@@ -20,31 +21,28 @@ def export_binary(df, output_path: str, vocab_size: int) -> None:
     use_uint16 = vocab_size < 65_535
     dtype      = "<H" if use_uint16 else "<I" 
 
-    all_ids = (
-        df.select("input_ids")
-          .rdd
-          .flatMap(lambda row: row["input_ids"])
-          .collect()
-    )
-
     bin_path = os.path.join(output_path, "tokenized.bin")
+    token_count = 0
     with open(bin_path, "wb") as f:
-        for token_id in all_ids:
-            f.write(struct.pack(dtype, token_id))
+        for row in df.select("input_ids").toLocalIterator():
+            for token_id in row["input_ids"]:
+                f.write(struct.pack(dtype, token_id))
+                token_count += 1
 
     size_gb  = os.path.getsize(bin_path) / (1024**3)
     dtype_str = "uint16" if use_uint16 else "uint32"
-    log.info(f"Binary export: {bin_path} ({size_gb:.2f} GB, {dtype_str})")
+    log.info(f"Binary export: {bin_path} ({size_gb:.2f} GB, {dtype_str}, {token_count:,} tokens)")
 
 
 def export_arrow(df, output_path: str) -> None:
     log.info("Exporting ke Arrow format (HuggingFace datasets)...")
     arrow_path = os.path.join(output_path, "hf_dataset")
+    parquet_path = os.path.join(output_path, "tokenized_for_hf.parquet")
     try:
         from datasets import Dataset
 
-        pandas_df  = df.select("input_ids", "attention_mask").toPandas()
-        hf_dataset = Dataset.from_pandas(pandas_df)
+        df.select("input_ids", "attention_mask").write.mode("overwrite").parquet(parquet_path)
+        hf_dataset = Dataset.from_parquet(parquet_path)
         hf_dataset.save_to_disk(arrow_path)
         log.info(f"Arrow export: {arrow_path}")
     except ImportError:

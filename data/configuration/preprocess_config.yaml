@@ -1,12 +1,13 @@
 spark:
   defaults:
     available_ram_fraction: 0.75
+    local_mode_reserved_ram_gb: 1.0
     memory_overhead_fraction: 0.1
     min_driver_overhead_mb: 384
     min_executor_overhead_mb: 384
     min_shuffle_partitions: 200
-    memory_fraction: 0.8
-    memory_storage_fraction: 0.3
+    memory_fraction: 0.6
+    memory_storage_fraction: 0.2
     kryo_buffer_max: "512m"
     parquet_codec: "snappy"
     max_partition_bytes: "256mb"
@@ -16,13 +17,13 @@ spark:
     rpc_timeout: "600s"
   workloads:
     cleaning:
-      driver_mem_fraction: 0.2
-      executor_mem_fraction: 0.8
+      driver_mem_fraction: 0.5
+      executor_mem_fraction: 0.25
       driver_mem_min_gb: 2
-      executor_mem_min_gb: 4
-      local_cores_max: 8
-      parallelism_multiplier: 3
-      shuffle_multiplier: 4
+      executor_mem_min_gb: 1
+      local_cores_max: 4
+      parallelism_multiplier: 2
+      shuffle_multiplier: 2
     tokenize:
       driver_mem_fraction: 0.25
       executor_mem_fraction: 0.75

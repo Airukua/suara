@@ -14,10 +14,10 @@ def run(
     input_path:        str   = "data/raw",
     output_path:       str   = "data/cleaned",
     target_languages:  list  = None,
-    min_quality_score: float = 0.35,
+    min_quality_score: float = 0.25,
     dedup_enabled:     bool  = True,
     pii_removal:       bool  = True,
-    toxic_filter:      bool  = True,
+    toxic_filter:      bool  = False,
     sample_fraction:   float = None,
 ):
     print_system_info(title="SYSTEM INFO", show_gpu=True)

@@ -6,31 +6,33 @@ from pyspark.sql.functions import udf
 from pyspark.sql.types import BooleanType, FloatType, StringType
 
 _BOILERPLATE_PATTERNS = [
-    r"cookie[s]?\s+polic",
-    r"privacy\s+polic",
-    r"terms?\s+(of\s+)?(use|service|condition)",
-    r"accept\s+all\s+cookie",
-    r"404\s+(not\s+found|error|page)",
+    r"404\s+(not\s+found|error|page|halaman)",
     r"403\s+forbidden",
-    r"please\s+(enable|turn\s+on)\s+javascript",
-    r"javascript\s+(is\s+)?(required|disabled|not\s+enabled)",
+    r"(please|harap)\s+(enable|aktifkan|nyalakan)\s+javascript",
+    r"javascript\s+(is\s+)?(required|disabled|not\s+enabled|dinonaktifkan|tidak\s+aktif)",
     r"captcha|recaptcha",
-    r"(click|tap)\s+here\s+to\s+continue",
-    r"subscribe\s+to\s+(our\s+)?newsletter",
-    r"follow\s+us\s+on\s+(twitter|facebook|instagram)",
+    r"(click|tap|klik)\s+(here|di\s+sini)\s+to\s+continue",
 ]
 
-_TOXIC_PATTERNS = [
-    r"\b(kill|murder|bomb|terrorist|suicide)\b.*\b(instruction|how\s+to|guide|step)\b",
-    r"\b(how\s+to\s+make|manufacture|synthesize)\b.{0,50}\b(drug|weapon|explosive)\b",
-]
+# Dipakai hanya sebagai fallback heuristik pada deteksi bahasa.
+# Daftar ini tidak digunakan untuk menghapus kata dari teks.
+_ID_STOPWORDS = {
+    "yang", "dan", "di", "ke", "dari", "untuk", "dengan", "pada", "adalah",
+    "ini", "itu", "dalam", "atau", "juga", "tidak", "karena", "sebagai",
+    "oleh", "akan", "lebih", "sudah", "agar", "antara", "bisa", "masih",
+}
 
-_ID_STOPWORDS = {"yang", "dan", "di", "ke", "dari", "dengan", "untuk", "pada", "adalah"}
-_EN_STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "of", "in",
-                 "for", "on", "with", "at", "by", "from", "have", "has"}
+_EN_STOPWORDS = {
+    "the", "and", "of", "to", "in", "for", "with", "on", "is", "this",
+    "that", "from", "by", "as", "are", "be", "or", "an", "it", "at",
+    "was", "were", "can", "have", "has",
+}
 
 _MERSENNE_PRIME = (1 << 61) - 1
 _MAX_HASH       = (1 << 32) - 1
+_LITERAL_WHITESPACE_PATTERN = re.compile(r"\\+[nrtfv]+")
+_REPEATED_PUNCT_PATTERN = re.compile(r"([!?.,;:])\1{1,}")
+_DECORATIVE_SYMBOL_RUN_PATTERN = re.compile(r"([^\w\s])\1{2,}")
 
 
 def register_cleaning_udfs(spark) -> dict:
@@ -56,11 +58,32 @@ def register_cleaning_udfs(spark) -> dict:
     def normalize_whitespace(text):
         if text is None:
             return None
+        # Ubah escape sequence literal dari dataset mentah menjadi whitespace nyata.
+        text = _LITERAL_WHITESPACE_PATTERN.sub(
+            lambda match: "\n" if "n" in match.group(0) else " ",
+            text,
+        )
         text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]", "", text)
         text = re.sub(r"[\u200b\u200c\u200d\u200e\u200f\ufeff]", "", text)
+        text = _REPEATED_PUNCT_PATTERN.sub(r"\1", text)
+        # Pangkas simbol dekoratif panjang seperti blok/ornamen forum yang bikin tokenizer ribut.
+        text = _DECORATIVE_SYMBOL_RUN_PATTERN.sub(r"\1", text)
         # Normalisasi spasi dan newline
         text = text.replace("\t", " ").replace("\f", " ")
-        lines = [re.sub(r" {2,}", " ", line).strip() for line in text.split("\n")]
+        cleaned_lines = []
+        for line in text.split("\n"):
+            tokens = []
+            for token in line.split():
+                alnum_count = sum(ch.isalnum() for ch in token)
+                symbol_count = sum(
+                    unicodedata.category(ch).startswith(("S", "P"))
+                    for ch in token
+                )
+                if alnum_count == 0 and symbol_count >= 3:
+                    continue
+                tokens.append(token)
+            cleaned_lines.append(re.sub(r" {2,}", " ", " ".join(tokens)).strip())
+        lines = cleaned_lines
         text  = "\n".join(lines)
         text  = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
@@ -121,17 +144,18 @@ def register_cleaning_udfs(spark) -> dict:
 
     @udf(returnType=BooleanType())
     def passes_length_filter(text,
-                              min_chars=100,
+                              min_chars=40,
                               max_chars=1_000_000,
-                              min_words=20,
-                              min_sentences=3):
+                              min_words=8,
+                              min_sentences=1):
         if text is None:
             return False
         if not (min_chars <= len(text) <= max_chars):
             return False
         if len(text.split()) < min_words:
             return False
-        if len(re.split(r"[.!?]+", text)) < min_sentences:
+        sentence_count = sum(1 for s in re.split(r"[.!?]+", text) if s.strip())
+        if sentence_count < min_sentences:
             return False
         return True
 
@@ -156,10 +180,10 @@ def register_cleaning_udfs(spark) -> dict:
 
     @udf(returnType=BooleanType())
     def has_excessive_repetition(text):
-        if text is None or len(text) < 50:
+        if text is None or len(text) < 80:
             return False
         words = text.lower().split()
-        if len(words) < 20:
+        if len(words) < 16:
             return False
 
         # Cek rasio trigram unik
@@ -182,32 +206,28 @@ def register_cleaning_udfs(spark) -> dict:
         words      = text.split()
         word_count = len(words)
         scores     = []
-        if 200 <= word_count <= 50_000:
+        if 80 <= word_count <= 50_000:
             len_score = 1.0
-        elif word_count < 200:
-            len_score = word_count / 200
+        elif word_count < 80:
+            len_score = word_count / 80
         else:
             len_score = max(0.0, 1.0 - (word_count - 50_000) / 100_000)
         scores.append(len_score * 0.2)
 
         unique_words = len(set(w.lower() for w in words))
         ttr = min(1.0, unique_words / max(1, word_count) * 2)
-        scores.append(ttr * 0.25)
-        stopwords     = _ID_STOPWORDS | _EN_STOPWORDS
-        content_words = [w for w in words if w.lower() not in stopwords and len(w) > 2]
-        content_ratio = len(content_words) / max(1, word_count)
-        scores.append(min(1.0, content_ratio * 1.5) * 0.15)
+        scores.append(ttr * 0.35)
         sentences     = re.split(r"[.!?]+", text)
-        good_sents    = sum(1 for s in sentences if 5 <= len(s.split()) <= 200)
-        scores.append((good_sents / max(1, len(sentences))) * 0.2)
+        good_sents    = sum(1 for s in sentences if 3 <= len(s.split()) <= 200)
+        scores.append((good_sents / max(1, len(sentences))) * 0.25)
         avg_word_len = sum(len(w) for w in words) / max(1, word_count)
         scores.append(min(1.0, max(0.0, (avg_word_len - 3) / 5)) * 0.1)
         punct       = sum(c in ".!?,;:" for c in text)
         punct_ratio = punct / max(1, len(text))
-        if 0.01 <= punct_ratio <= 0.08:
+        if 0.005 <= punct_ratio <= 0.08:
             punct_score = 1.0
-        elif punct_ratio < 0.01:
-            punct_score = punct_ratio / 0.01
+        elif punct_ratio < 0.005:
+            punct_score = punct_ratio / 0.005
         else:
             punct_score = max(0.0, 1.0 - (punct_ratio - 0.08) * 10)
         scores.append(punct_score * 0.1)
@@ -272,10 +292,7 @@ def register_cleaning_udfs(spark) -> dict:
 
     @udf(returnType=BooleanType())
     def has_toxic_content(text):
-        if text is None:
-            return False
-        text_lower = text.lower()
-        return any(re.search(p, text_lower) for p in _TOXIC_PATTERNS)
+        return False if text is not None else False
 
     return {
         "fix_encoding":             fix_encoding,

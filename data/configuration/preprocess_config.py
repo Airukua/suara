@@ -1,4 +1,5 @@
 import logging
+import math
 from pathlib import Path
 
 import psutil
@@ -14,6 +15,15 @@ def load_preprocess_config(config_path: str = None) -> dict:
     path = Path(config_path) if config_path else _CONFIG_PATH
     with open(path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file) or {}
+
+
+def _compute_safe_local_cores(cores: int, available_ram_gb: float, local_cores_limit: int) -> int:
+    safe_cores = max(1, min(cores, local_cores_limit))
+    if available_ram_gb <= 4.5:
+        return min(safe_cores, 2)
+    if available_ram_gb <= 8.0:
+        return min(safe_cores, 4)
+    return safe_cores
 
 
 def compute_spark_config(workload: str = "cleaning", config_path: str = None) -> dict:
@@ -46,12 +56,20 @@ def compute_spark_config(workload: str = "cleaning", config_path: str = None) ->
     # and thread counts can kill the single JVM. Keep some headroom for Python,
     # the OS, and tokenizer libraries.
     local_cores_limit = workload_settings.get("local_cores_max", 8)
-    safe_cores = max(1, min(cores, local_cores_limit))
-    safe_total_mem_gb = max(2, int(max(available_ram_gb - 1.0, 2)))
-    driver_mem = max(2, min(driver_mem, max(2, safe_total_mem_gb // 2)))
-    executor_mem = max(2, min(executor_mem, max(2, safe_total_mem_gb - driver_mem)))
-    default_parallelism = min(default_parallelism, safe_cores * 3)
-    shuffle_partitions = min(shuffle_partitions, max(32, safe_cores * 4))
+    safe_cores = _compute_safe_local_cores(cores, available_ram_gb, local_cores_limit)
+    reserve_ram_gb = defaults.get("local_mode_reserved_ram_gb", 1.0)
+    safe_total_mem_gb = max(2, math.ceil(max(available_ram_gb - reserve_ram_gb, 2.0)))
+
+    # In local mode Spark runs inside a single JVM, so favor driver heap and
+    # keep parallelism low enough that shuffle-heavy stages do not OOM.
+    driver_mem_cap = max(2, safe_total_mem_gb - 1)
+    driver_mem = max(
+        workload_settings.get("driver_mem_min_gb", 2),
+        min(max(driver_mem, safe_total_mem_gb - 1), driver_mem_cap),
+    )
+    executor_mem = max(1, min(executor_mem, max(1, safe_total_mem_gb - driver_mem)))
+    default_parallelism = min(default_parallelism, max(2, safe_cores * 2))
+    shuffle_partitions = min(shuffle_partitions, max(16, safe_cores * 3))
 
     driver_overhead = max(
         defaults.get("min_driver_overhead_mb", 384),
@@ -114,7 +132,12 @@ def create_spark_session(
 
     cores = psutil.cpu_count(logical=True)
     workload_settings = load_preprocess_config(config_path).get("spark", {}).get("workloads", {}).get(workload, {})
-    local_cores = max(1, min(cores, workload_settings.get("local_cores_max", 8)))
+    available_ram_gb = psutil.virtual_memory().available / (1024**3)
+    local_cores = _compute_safe_local_cores(
+        cores,
+        available_ram_gb,
+        workload_settings.get("local_cores_max", 8),
+    )
     builder = SparkSession.builder.appName(app_name).master(f"local[{local_cores}]")
 
     for key, value in config.items():

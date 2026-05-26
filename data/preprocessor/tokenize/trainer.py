@@ -192,13 +192,13 @@ class TokenizerTrainer:
         input_path: str,
         output_txt: str,
         text_column: str = "text",
-        max_lines: int = 5_000_000,
+        max_lines: int | None = 5_000_000,
         sample_fraction: float = None,
     ) -> str:
         log.info("Extracting corpus untuk training tokenizer...")
         log.info(f"  Source    : {input_path}")
         log.info(f"  Target    : {output_txt}")
-        log.info(f"  Max lines : {max_lines:,}")
+        log.info(f"  Max lines : {max_lines:,}" if max_lines is not None else "  Max lines : unlimited")
 
         if "parquet" in input_path or input_path.endswith(".parquet"):
             df = spark.read.parquet(input_path)
@@ -208,22 +208,20 @@ class TokenizerTrainer:
         if sample_fraction:
             df = df.sample(fraction=sample_fraction, seed=42)
 
-        texts = (
-            df.select(text_column)
-            .filter(F.col(text_column).isNotNull())
-            .limit(max_lines)
-            .rdd.map(lambda row: row[0])
-            .collect()
-        )
+        texts_df = df.select(text_column).filter(F.col(text_column).isNotNull())
+        if max_lines is not None:
+            texts_df = texts_df.limit(max_lines)
 
         os.makedirs(os.path.dirname(output_txt) or ".", exist_ok=True)
+        written = 0
         with open(output_txt, "w", encoding="utf-8") as file:
-            for text in texts:
+            for text in texts_df.rdd.map(lambda row: row[0]).toLocalIterator():
                 line = text.replace("\n", " ").strip()
                 if line:
                     file.write(line + "\n")
+                    written += 1
 
-        log.info(f"  Ditulis {len(texts):,} baris ke {output_txt}")
+        log.info(f"  Ditulis {written:,} baris ke {output_txt}")
         return output_txt
 
 
