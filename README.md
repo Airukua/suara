@@ -1,78 +1,267 @@
-**SUARA**
+# SUARA
 
-SUARA is an autoregressive language modeling implementation focused on efficient causal convolution-based sequence modeling and flexible FFN choices (MoE / dense). The codebase provides training, evaluation, and generation utilities together with configuration-driven experiments and checkpointing.
+An experimental language model built around **CausalWaveConv** — a frequency-domain sequence mixer
+that replaces self-attention with learned wavelet convolutions. The core research question: can a
+model learn long-range dependencies through spectral filtering instead of pairwise token comparisons?
 
-**Features**
-- **Architecture**: token embedding + stacked `Block` modules combining a CausalWaveConv attention-like convolution and a SwiGLU or MoE feed-forward.
-- **Flexible FFN**: supports dense SwiGLU or Mixture-of-Experts (MoE) routing with auxiliary load-balancing loss.
-- **Normalizers**: multiple normalization options (RMS, Layer, Dual, Group, Power, etc.).
-- **Training utilities**: configurable optimizer/scheduler, mixed precision (bf16/fp16), gradient checkpointing, wandb support.
-- **Inference**: bundled generation helpers and support for inference bundles.
+> **Research status.** This architecture is under active investigation. It is not production-ready.
+> Use it for experimentation, benchmarking, and further research.
 
-**Repository Structure (key files)**
-- **Main entry**: [main.py](main.py) — training entrypoint and dataset loader.
-- **Model**: [pipeline/model.py](pipeline/model.py) — `SuaRA` model definition.
-- **Blocks & primitives**: [arc/block.py](arc/block.py), [arc/waveconv.py](arc/waveconv.py), [arc/ffn.py](arc/ffn.py), [arc/normalizer.py](arc/normalizer.py).
-- **Training loop**: [pipeline/training.py](pipeline/training.py).
-- **Inference**: [pipeline/inference.py](pipeline/inference.py) — tokenizer wrapper and generation utilities.
-- **Config**: [data/configuration/config.yaml](data/configuration/config.yaml) (defaults) and loader [data/configuration/config.py](data/configuration/config.py).
-- **Artifacts**: `artifacts/checkpoints/` — saved `best.pt`, `last.pt` and exported bundles.
+---
 
-**Installation**
-Install Python requirements and optional extras (tokenizers, sentencepiece, transformers):
+## What is CausalWaveConv?
 
-```bash
-python -m pip install -r requirements.txt
-# If using HF tokenizers or sentencepiece:
-python -m pip install sentencepiece tokenizers transformers
+Standard attention asks *"how much should token A attend to token B?"* for every pair — powerful,
+but O(L²) in time and memory. CausalWaveConv takes a different route: it learns **wave-shaped
+filters** that sweep across the entire sequence and pick out different temporal patterns. Think of
+it as a bank of tunable radio receivers — each one resonates at a different frequency and timescale,
+and the model learns which frequencies matter.
+
+### Signal flow
+
+```
+  Input sequence  x  [B, L, D]
+         │
+         ├─────────────────────────────────────────────┐
+         │                                             │
+         ▼                                             ▼
+   ┌─────────────┐                             ┌─────────────┐
+   │   W_v proj  │                             │   W_q proj  │
+   │  (values)   │                             │   (gates)   │
+   └──────┬──────┘                             └──────┬──────┘
+          │  v [B, L, H, Dh]                          │  sigmoid
+          │                                           │  gate [B, L, H, K]
+          ▼                                           │
+   ┌──────────────────────────────────┐               │
+   │         FFT convolution          │               │
+   │                                  │               │
+   │  1. pad v  →  FFT(v)             │               │
+   │  2. build kernel  (H × K scales) │               │
+   │     ┌──────────────────────┐     │               │
+   │     │  static Morlet basis │     │               │
+   │     │  + dynamic δ(input)  │     │               │
+   │     │  + causal enforcement│     │               │
+   │     └──────────────────────┘     │               │
+   │  3. FFT(v) × kernel              │               │
+   │  4. IFFT  →  per-scale output    │               │
+   └──────────────┬───────────────────┘               │
+                  │  [B, H, K, L, Dh]                 │
+                  ▼                                    │
+          ┌───────────────┐                            │
+          │ scale_interact│  (mix across K scales)     │
+          └───────┬───────┘                            │
+                  │                                    │
+                  └──────────────┬─────────────────────┘
+                                 │  weighted sum over K
+                                 ▼
+                        ┌─────────────────┐
+                        │    out_proj      │
+                        └────────┬────────┘
+                                 │
+                          output [B, L, D]
 ```
 
-**Quick Start**
+### Stage 1 — building the kernel
 
-- Train a model (uses `data/configuration/config.yaml` by default):
+Each convolution kernel is a superposition of **Morlet wavelets** (oscillating waves with a Gaussian
+envelope), composed of two parts:
 
-```bash
-python main.py --config data/configuration/config.yaml --label suara_experiment
+```
+  kernel = static_component + dynamic_correction
+               │                      │
+               │                      └─ small projection from mean(x)
+               │                         lets the filter adapt to context
+               │
+               └─ learned ω₀, amplitude, phase shift
+                  the model's prior on what patterns to look for
+
+  Then: enforce causality in the frequency domain
+        (zero out "future" side of the spectrum)
 ```
 
-- Generate text from a checkpoint:
+### Stage 2 — FFT convolution
+
+Convolving over the full sequence length via the FFT:
+
+```
+  output = IFFT( FFT(v_padded) × kernel )
+
+  Complexity:  O(L log L)   vs   O(L²) for attention
+```
+
+Mathematically equivalent to a causal convolution over every position, but long sequences stay
+tractable.
+
+### Stage 3 — multi-scale gating
+
+The model runs `K` wavelet scales in parallel (short, medium, long range) across `H` heads:
+
+```
+  scales:   [──── short ────]   captures local syntax
+            [─────── mid ────────]   captures phrase structure
+            [────────────── long ──────────────]   captures document-level patterns
+
+  gate (from W_q):  per-position sigmoid weight for each scale
+  scale_interact:   small MLP mixes information across scales
+  → weighted sum → out_proj → output
+```
+
+### Why not attention?
+
+|                  | Self-attention              | CausalWaveConv              |
+|------------------|-----------------------------|-----------------------------|
+| Complexity       | O(L²)                       | O(L log L)                  |
+| Long-range       | Direct token comparison     | Global spectral filtering   |
+| Adaptivity       | Per-token Q/K/V             | Per-input kernel modulation |
+| Interpretability | Attention weight matrix     | Kernel frequency spectrum   |
+
+The two mechanisms are **complementary** — attention excels at sparse, content-driven retrieval
+while wavelet convolution excels at structured temporal patterns. Combining them is an open research
+direction; currently the architecture uses CausalWaveConv only.
+
+---
+
+## Architecture
+
+Each `Block` stacks a CausalWaveConv mixer with a feed-forward network:
+
+```
+  Token IDs
+      │
+      ▼
+ ┌─────────────────────────────────────────┐
+ │              Embedding                  │
+ └───────────────────┬─────────────────────┘
+                     │
+         ┌───────────▼───────────┐
+         │        Block × N      │
+         │  ┌─────────────────┐  │
+         │  │  CausalWaveConv │  │  ← sequence mixing
+         │  └────────┬────────┘  │
+         │  ┌────────▼────────┐  │
+         │  │      Norm       │  │  ← RMS / Layer / Dual / Group / Power
+         │  └────────┬────────┘  │
+         │  ┌────────▼────────┐  │
+         │  │  FeedForward    │  │  ← dense SwiGLU  or  MoE
+         │  └─────────────────┘  │
+         └───────────┬───────────┘
+                     │
+      ┌──────────────▼──────────────┐
+      │          LM Head            │
+      └─────────────────────────────┘
+                     │
+                  logits
+```
+
+**MoE option:** a router dispatches each token to a subset of expert FFNs. An auxiliary
+load-balancing loss encourages uniform expert utilization during training.
+
+---
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+
+# Optional: for HuggingFace tokenizers / sentencepiece
+pip install sentencepiece tokenizers transformers
+```
+
+---
+
+## Quick Start
+
+**Train a model**
+
+```bash
+python main.py --config data/configuration/config.yaml --label my_experiment
+```
+
+**Generate text from a checkpoint**
 
 ```bash
 python pipeline/inference.py "Your prompt here" --config data/configuration/config.yaml
 ```
 
-- Count model parameters from config:
+**Count parameters**
 
 ```bash
 python utils/calculate_params.py --config data/configuration/config.yaml
 ```
 
-**Configuration**
-- Project configuration is read with `load_config()` from [data/configuration/config.py](data/configuration/config.py). The main YAML (defaults) is [data/configuration/config.yaml](data/configuration/config.yaml).
-- Important config sections: `model`, `training`, `training_data`, `tokenizer`, `generation`, `checkpoint`, `wandb`.
+---
 
-**Model architecture (brief)**
-- `SuaRA` embeds token ids and applies a stack of `Block` modules. Each `Block` combines:
-	- `CausalWaveConv` — a learned, causal convolution implemented via FFT kernels for long-range context.
-	- A normalization layer (configurable via `norm_type`).
-	- A `FeedForward` which is either `SwiGLU` (dense) or `MoE` (mixture-of-experts) with auxiliary load-balancing loss.
+## Configuration
 
-**Research status**
-- This architecture is experimental and under active research. The implementation and design choices are intended for investigation and development; it is not guaranteed to be production-ready. Use for experimentation, benchmarking, and further research; evaluate stability and performance before any production deployment.
+All configuration lives in `data/configuration/config.yaml`, loaded by `load_config()` from
+`data/configuration/config.py`. Key sections:
 
-**Data & Tokenization**
-- Tokenizer config lives in `data/configuration/config.yaml` and is loaded by `InferenceTokenizer` in [pipeline/inference.py](pipeline/inference.py).
-- Training data expects tokenized parquet files (see `TrainingDataConfig.train_tokens_path` in [data/configuration/config.py](data/configuration/config.py)).
+| Section         | Controls                                                  |
+|-----------------|-----------------------------------------------------------|
+| `model`         | depth, dim, heads, scales, norm type, FFN type            |
+| `training`      | optimizer, scheduler, mixed precision, grad checkpointing |
+| `training_data` | path to tokenized parquet files                           |
+| `tokenizer`     | tokenizer type and vocabulary                             |
+| `generation`    | sampling parameters (temperature, top-k, top-p)           |
+| `checkpoint`    | output directory, save frequency                          |
+| `wandb`         | experiment tracking                                       |
 
-**Checkpoints & Bundles**
-- Training saves `best.pt` and `last.pt` under the configured checkpoint `output_directory` (default `artifacts/checkpoints`).
-- Inference can also load exported bundles with the internal format `suara_inference_bundle` containing `model_state_dict`, `model_config`, and `tokenizer_config`.
+---
 
-**Development & Contributing**
-- Run linters and tests (not included in repo) before opening PRs.
-- When adding features, keep `config.yaml` defaults updated and add example runs to `artifacts/plots`.
+## Repository Structure
 
-**License**
-- See the `LICENSE` file in the repository root.
+```
+suara/
+├── main.py                          # Training entrypoint
+├── pipeline/
+│   ├── model.py                     # SuaRA model definition
+│   ├── training.py                  # Training loop
+│   └── inference.py                 # Tokenizer wrapper + generation
+├── arc/
+│   ├── block.py                     # Block (WaveConv + FFN)
+│   ├── waveconv.py                  # CausalWaveConv implementation
+│   ├── ffn.py                       # SwiGLU and MoE feed-forwards
+│   └── normalizer.py                # Normalization variants
+├── data/configuration/
+│   ├── config.yaml                  # Default configuration
+│   └── config.py                    # Config loader
+├── utils/
+│   └── calculate_params.py          # Parameter counter
+└── artifacts/
+    └── checkpoints/                 # best.pt, last.pt, exported bundles
+```
 
-If you'd like, I can add example commands, training tips, or a short model card summarizing benchmark results — tell me which you'd prefer.
+---
+
+## Checkpoints & Inference Bundles
+
+Training saves two checkpoints under `artifacts/checkpoints/` (or the configured
+`output_directory`):
+
+- `best.pt` — lowest validation loss checkpoint
+- `last.pt` — most recent checkpoint
+
+Inference bundles are an exportable format containing `model_state_dict`, `model_config`, and
+`tokenizer_config` in a single file, loadable by `InferenceTokenizer` in `pipeline/inference.py`.
+
+---
+
+## Data & Tokenization
+
+Training data is expected as tokenized parquet files. Set the path via
+`TrainingDataConfig.train_tokens_path` in `config.yaml`. Tokenizer configuration is co-located in
+the same config file and loaded automatically at training and inference time.
+
+---
+
+## Contributing
+
+- Keep `config.yaml` defaults updated when adding new options.
+- Add example runs and loss curves to `artifacts/plots/`.
+- Run linters and tests before opening PRs.
+
+---
+
+## License
+
+See the `LICENSE` file in the repository root.
